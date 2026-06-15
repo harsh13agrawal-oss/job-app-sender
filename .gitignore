@@ -2,6 +2,10 @@
 credentials.json
 token.json
 .streamlit/secrets.toml
+_gmail_token_block.toml
+_final_secrets.toml
+*-service-account.json
+engaged-ground-*.json
 
 # Local-only data
 config.json
