@@ -1,0 +1,22 @@
+# Secrets — never commit
+credentials.json
+token.json
+.streamlit/secrets.toml
+
+# Local-only data
+config.json
+templates.json
+logs/
+cvs/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
