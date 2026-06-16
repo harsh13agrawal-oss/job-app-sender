@@ -819,6 +819,84 @@ def tab_templates() -> None:
                 st.rerun()
 
 
+@st.cache_data
+def _sample_recipients_xlsx_bytes() -> bytes:
+    """Build a sample recipient list as an Excel file in memory."""
+    df = pd.DataFrame(
+        [
+            {
+                "name": "Anika Sharma",
+                "email": "anika.sharma@example.com",
+                "company": "Apex Capital Partners",
+                "role": "Investment Analyst",
+                "custom1": "your buy-and-build thesis in Indian healthcare mid-market",
+                "custom2": "I am available next Tuesday for a call.",
+            },
+            {
+                "name": "Rohan Mehta",
+                "email": "rohan.mehta@example.com",
+                "company": "Vertex Strategy Group",
+                "role": "Associate Consultant",
+                "custom1": "",
+                "custom2": "",
+            },
+            {
+                "name": "Priya Iyer",
+                "email": "priya.iyer@example.com",
+                "company": "LedgerWave Technologies",
+                "role": "Senior Finance Analyst",
+                "custom1": "scaling the finance function from Series B to D",
+                "custom2": "Happy to jump on a quick call this week.",
+            },
+        ]
+    )
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Recipients", index=False)
+        ws = writer.sheets["Recipients"]
+        for col_idx, col_name in enumerate(df.columns, start=1):
+            from openpyxl.utils import get_column_letter
+            max_len = max(
+                [len(str(col_name))]
+                + [len(str(v)) for v in df[col_name].tolist()]
+            )
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 2, 60)
+    return buf.getvalue()
+
+
+@st.cache_data
+def _sample_recipients_csv_bytes() -> bytes:
+    df = pd.DataFrame(
+        [
+            {
+                "name": "Anika Sharma",
+                "email": "anika.sharma@example.com",
+                "company": "Apex Capital Partners",
+                "role": "Investment Analyst",
+                "custom1": "your buy-and-build thesis in Indian healthcare mid-market",
+                "custom2": "I am available next Tuesday for a call.",
+            },
+            {
+                "name": "Rohan Mehta",
+                "email": "rohan.mehta@example.com",
+                "company": "Vertex Strategy Group",
+                "role": "Associate Consultant",
+                "custom1": "",
+                "custom2": "",
+            },
+            {
+                "name": "Priya Iyer",
+                "email": "priya.iyer@example.com",
+                "company": "LedgerWave Technologies",
+                "role": "Senior Finance Analyst",
+                "custom1": "scaling the finance function from Series B to D",
+                "custom2": "Happy to jump on a quick call this week.",
+            },
+        ]
+    )
+    return df.to_csv(index=False).encode("utf-8")
+
+
 def tab_quick_send() -> None:
     """Simple one-shot bulk send: list + one CV + one template -> sends to all."""
     cfg = st.session_state.config
@@ -833,6 +911,25 @@ def tab_quick_send() -> None:
         "Required columns: `name`, `email`, `company`. "
         "Optional: `role`, `custom1`, `custom2`."
     )
+    c_xlsx, c_csv, _spacer = st.columns([1, 1, 3])
+    with c_xlsx:
+        st.download_button(
+            "⬇️ Sample Excel",
+            data=_sample_recipients_xlsx_bytes(),
+            file_name="sample_recipients.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            help="Download a sample .xlsx with the right columns and 3 example rows.",
+        )
+    with c_csv:
+        st.download_button(
+            "⬇️ Sample CSV",
+            data=_sample_recipients_csv_bytes(),
+            file_name="sample_recipients.csv",
+            mime="text/csv",
+            use_container_width=True,
+            help="Download a sample .csv with the right columns and 3 example rows.",
+        )
     uploaded = st.file_uploader("Upload list", type=["csv", "xlsx"], key="quick_uploader")
 
     # ---- Step 2: pick or upload a CV ----
