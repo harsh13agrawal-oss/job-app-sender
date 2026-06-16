@@ -72,7 +72,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sender_display_name": "CA Harsh Agarwal",
     "phone": "",
     "linkedin_url": "",
-    "bcc_self": True,
+    "bcc_self": False,
     "min_delay_sec": 45,
     "max_delay_sec": 120,
     "daily_cap": 40,
@@ -1435,15 +1435,9 @@ def tab_followup() -> None:
     n_selected = len(to_send)
     st.markdown(f"**Step 4 — Send to {n_selected} selected**")
 
-    send_as_reply = st.checkbox(
-        "✉️ Send as a reply in the original Gmail thread (recommended)",
-        value=True,
-        key="followup_send_as_reply",
-        help=(
-            "When on: the follow-up is threaded under the first email — same "
-            "conversation, 'Re:' subject, original message quoted below. "
-            "When off: a fresh, separate email."
-        ),
+    st.caption(
+        "Follow-up is sent as a reply on the original email thread "
+        "(same conversation, 'Re:' subject)."
     )
 
     send_clicked = st.button(
@@ -1493,16 +1487,15 @@ def tab_followup() -> None:
 
         thread_id_val: str | None = None
         in_reply_to_val: str | None = None
-        if send_as_reply:
-            orig_msg_id = msg_ids_map.get(recipient_email, "")
-            if orig_msg_id:
-                meta = st.session_state.sender.get_message_meta(orig_msg_id)
-                if meta:
-                    thread_id_val = meta.get("thread_id") or None
-                    in_reply_to_val = meta.get("message_id_header") or None
-                    orig_subj = meta.get("subject") or ""
-                    if orig_subj and not sub.lower().startswith("re:"):
-                        sub = f"Re: {orig_subj}"
+        orig_msg_id = msg_ids_map.get(recipient_email, "")
+        if orig_msg_id:
+            meta = st.session_state.sender.get_message_meta(orig_msg_id)
+            if meta:
+                thread_id_val = meta.get("thread_id") or None
+                in_reply_to_val = meta.get("message_id_header") or None
+                orig_subj = meta.get("subject") or ""
+                if orig_subj and not sub.lower().startswith("re:"):
+                    sub = f"Re: {orig_subj}"
 
         ok, info = do_send(
             name, recipient_email, company, role, "Follow-up",
