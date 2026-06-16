@@ -389,9 +389,17 @@ def do_send(
     subject: str,
     html_body: str,
     cfg: dict[str, Any],
+    attachments: list | None = None,
 ) -> tuple[bool, str]:
-    attachments = attachments_for_sector(cfg, sector)
+    if attachments is None:
+        attachments = attachments_for_sector(cfg, sector)
     ok, msg = preflight_send(recipient_email, subject, html_body, attachments, cfg)
+
+    def _label(att) -> str:
+        if isinstance(att[0], (bytes, bytearray)):
+            return att[1] or "(uploaded)"
+        return str(att[0])
+
     if not ok:
         append_entry(
             {
@@ -401,7 +409,7 @@ def do_send(
                 "company": company,
                 "role": role,
                 "sector": sector,
-                "cv_used": ", ".join(p for p, _ in attachments),
+                "cv_used": ", ".join(_label(a) for a in attachments),
                 "subject": subject,
                 "status": "skipped",
                 "message_id_or_error": msg,
@@ -428,7 +436,7 @@ def do_send(
             "company": company,
             "role": role,
             "sector": sector,
-            "cv_used": ", ".join(p for p, _ in attachments),
+            "cv_used": ", ".join(_label(a) for a in attachments),
             "subject": subject,
             "status": "sent" if ok else "failed",
             "message_id_or_error": info,
@@ -734,6 +742,175 @@ def tab_templates() -> None:
                 st.rerun()
 
 
+def tab_quick_send() -> None:
+    """Simple one-shot bulk send: list + one CV + one template -> sends to all."""
+    cfg = st.session_state.config
+    st.subheader("Quick Send")
+    st.caption(
+        "Upload a list, upload one CV, type a message, click Send. "
+        "Everyone gets the same template (personalised with their name + company)."
+    )
+
+    st.markdown("**Step 1 — Recipient list (CSV or XLSX)**")
+    st.caption(
+        "Required columns: `name`, `email`, `company`. "
+        "Optional: `role`, `custom1`, `custom2`."
+    )
+    uploaded = st.file_uploader("Upload list", type=["csv", "xlsx"], key="quick_uploader")
+
+    st.markdown("**Step 2 — Your CV** (single PDF, attached to every email)")
+    cv_file = st.file_uploader("Upload CV PDF", type=["pdf"], key="quick_cv_upload")
+    cv_display = st.text_input(
+        "Filename recipients see",
+        value=cfg.get("cv_display_filename") or "CV.pdf",
+        key="quick_cv_display",
+    )
+
+    st.markdown(
+        "**Step 3 — Your message**  "
+        "(use `{name}`, `{company}`, `{role}`, `{custom1}`, `{custom2}` as placeholders)"
+    )
+    default_subject = "Application for {role} at {company} – CA Harsh Agarwal"
+    default_body = (
+        "<p>Dear {name},</p>"
+        "<p>I am writing to express my interest in the <strong>{role}</strong> opportunity at "
+        "<strong>{company}</strong>.</p>"
+        "<p>{custom1}</p>"
+        "<p>As a Chartered Accountant, I bring experience across financial reporting, "
+        "valuation, and analysis. I have attached my CV for your review and would welcome "
+        "the opportunity to discuss how I could contribute to {company}.</p>"
+        "<p>{custom2}</p>"
+        "<p>Warm regards,<br><strong>CA Harsh Agarwal</strong></p>"
+    )
+    subject = st.text_input("Subject", value=default_subject, key="quick_subject")
+    body = st.text_area("Body (HTML)", value=default_body, height=280, key="quick_body")
+
+    skip_dupes = st.checkbox(
+        "Skip duplicates already in send log", value=True, key="quick_skip"
+    )
+
+    if uploaded is None or cv_file is None:
+        st.info("Upload both the list and the CV to continue.")
+        return
+
+    try:
+        if uploaded.name.lower().endswith(".xlsx"):
+            df = pd.read_excel(uploaded, engine="openpyxl")
+        else:
+            df = pd.read_csv(uploaded)
+    except Exception as e:
+        st.error(f"Could not read recipient list: {e}")
+        return
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    required = ["name", "email", "company"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(f"Missing required columns: {missing}. Found: {list(df.columns)}")
+        return
+    for col in ["role", "custom1", "custom2"]:
+        if col not in df.columns:
+            df[col] = ""
+    df = df.fillna("")
+
+    st.markdown(f"**Preview — {len(df)} recipient(s):**")
+    st.dataframe(df, use_container_width=True)
+
+    if len(df) > 0:
+        first = df.iloc[0].to_dict()
+        ctx = build_context(first, cfg)
+        with st.expander(f"Preview email to {first.get('name', '')}"):
+            st.markdown(f"**Subject:** {render(subject, ctx)}")
+            st.markdown(f"**Attachment:** {cv_display}")
+            st.markdown("---")
+            st.markdown(render(body, ctx), unsafe_allow_html=True)
+
+    send_clicked = st.button(
+        "Send to all",
+        type="primary",
+        disabled=not st.session_state.connected,
+        help=("Connect Gmail first" if not st.session_state.connected else None),
+        use_container_width=True,
+    )
+    if not send_clicked:
+        return
+
+    cv_bytes = cv_file.getvalue()
+    attachments = [(cv_bytes, cv_display)]
+
+    progress = st.progress(0.0)
+    status_line = st.empty()
+    results: list[dict[str, str]] = []
+    total = len(df)
+    cap = int(cfg.get("daily_cap", 40))
+    min_d = int(cfg.get("min_delay_sec", 45))
+    max_d = int(cfg.get("max_delay_sec", 120))
+    if max_d < min_d:
+        min_d, max_d = max_d, min_d
+
+    rows = df.to_dict("records")
+    last_idx = total - 1
+    sent_this_run = 0
+
+    for i, row in enumerate(rows):
+        recipient_email = str(row.get("email", "") or "").strip()
+        company = str(row.get("company", "") or "").strip()
+        name = str(row.get("name", "") or "").strip()
+        role = str(row.get("role", "") or "").strip()
+
+        status_line.markdown(f"**[{i+1}/{total}]** {recipient_email or '(missing email)'}")
+
+        if sent_today_count() >= cap:
+            results.append(
+                {"email": recipient_email, "status": "stopped", "info": "Daily cap reached."}
+            )
+            for j in range(i, total):
+                results.append(
+                    {
+                        "email": str(rows[j].get("email", "")),
+                        "status": "skipped",
+                        "info": "Daily cap reached.",
+                    }
+                )
+            break
+
+        if skip_dupes and recipient_email and already_sent(
+            recipient_email, LOG_PATH, company=company or None
+        ):
+            results.append(
+                {"email": recipient_email, "status": "skipped", "info": "Duplicate."}
+            )
+            progress.progress((i + 1) / total)
+            continue
+
+        ctx = build_context(row, cfg)
+        sub = render(subject, ctx)
+        bod = render(body, ctx)
+
+        ok, info = do_send(
+            name, recipient_email, company, role, "Quick Send",
+            sub, bod, cfg, attachments=attachments,
+        )
+        results.append(
+            {"email": recipient_email, "status": "sent" if ok else "failed", "info": info}
+        )
+        if ok:
+            sent_this_run += 1
+
+        progress.progress((i + 1) / total)
+
+        if i != last_idx and ok:
+            delay = random.randint(min_d, max_d) if max_d > 0 else 0
+            if delay > 0:
+                status_line.markdown(
+                    f"**[{i+1}/{total}]** sleeping {delay}s before next send..."
+                )
+                time.sleep(delay)
+
+    status_line.markdown(f"**Done.** Sent {sent_this_run} this run.")
+    st.dataframe(pd.DataFrame(results), use_container_width=True)
+
+
 def tab_replies() -> None:
     st.subheader("Replies from people I've applied to")
     if not st.session_state.connected:
@@ -871,9 +1048,18 @@ def main() -> None:
         "Templates, attachments, delays, and a send log — all on disk."
     )
 
-    t1, t2, t3, t4, t5 = st.tabs(
-        ["📝 Compose", "📂 Bulk Import", "📋 Templates", "📊 Send Log", "📬 Replies"]
+    t_quick, t1, t2, t3, t4, t5 = st.tabs(
+        [
+            "🚀 Quick Send",
+            "📝 Compose",
+            "📂 Bulk Import",
+            "📋 Templates",
+            "📊 Send Log",
+            "📬 Replies",
+        ]
     )
+    with t_quick:
+        tab_quick_send()
     with t1:
         tab_compose()
     with t2:
