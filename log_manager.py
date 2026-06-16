@@ -39,9 +39,21 @@ def init_log(path: str) -> None:
             writer.writeheader()
 
 
+_MAX_CELL = 40000
+
+
+def _clip(val) -> str:
+    if val is None:
+        return ""
+    s = str(val)
+    if len(s) > _MAX_CELL:
+        s = s[: _MAX_CELL - 30] + f"...[truncated {len(s) - _MAX_CELL + 30} chars]"
+    return s
+
+
 def append_entry(entry: dict, path: str) -> None:
     init_log(path)
-    row = {k: ("" if entry.get(k) is None else str(entry.get(k))) for k in FIELDS}
+    row = {k: _clip(entry.get(k)) for k in FIELDS}
     with open(path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS)
         writer.writerow(row)

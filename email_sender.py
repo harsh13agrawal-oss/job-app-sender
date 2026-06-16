@@ -325,8 +325,13 @@ class GmailSender:
             result = self.service.users().messages().send(userId="me", body=message).execute()
             return True, result.get("id", "")
         except FileNotFoundError as e:
-            return False, str(e)
+            return False, str(e)[:1000]
         except HttpError as e:
-            return False, f"Gmail API error: {e}"
+            # HttpError stringifies to include the full request body; the
+            # request contains the base64-encoded MIME message + attachment
+            # which can be megabytes. Just take the status + reason.
+            status = getattr(e.resp, "status", "?") if hasattr(e, "resp") else "?"
+            reason = getattr(e, "reason", "") or ""
+            return False, f"Gmail API error: HTTP {status} {reason}"[:1000]
         except Exception as e:
-            return False, f"Send failed: {e}"
+            return False, f"Send failed: {e}"[:1000]

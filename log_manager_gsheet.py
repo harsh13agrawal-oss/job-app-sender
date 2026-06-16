@@ -69,9 +69,21 @@ def init_log(_path: str = "") -> None:
     _get_worksheet()
 
 
+_MAX_CELL = 40000  # Google Sheets caps at 50000; leave headroom.
+
+
+def _clip(val) -> str:
+    if val is None:
+        return ""
+    s = str(val)
+    if len(s) > _MAX_CELL:
+        s = s[: _MAX_CELL - 30] + f"...[truncated {len(s) - _MAX_CELL + 30} chars]"
+    return s
+
+
 def append_entry(entry: dict, _path: str = "") -> None:
     ws = _get_worksheet()
-    row = ["" if entry.get(k) is None else str(entry.get(k)) for k in FIELDS]
+    row = [_clip(entry.get(k)) for k in FIELDS]
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 
