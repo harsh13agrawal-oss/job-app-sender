@@ -179,6 +179,23 @@ def ensure_state() -> None:
         st.session_state.cv_library = {}  # {idx: bytes}
     if "cv_library_names" not in st.session_state:
         st.session_state.cv_library_names = {}  # {idx: name}
+    if "followup_candidates" not in st.session_state:
+        st.session_state.followup_candidates = []
+    if "followup_body_key_n" not in st.session_state:
+        st.session_state.followup_body_key_n = 0
+    if "followup_subject_text" not in st.session_state:
+        st.session_state.followup_subject_text = "Following up: {role} at {company}"
+        st.session_state.followup_body_initial = (
+            "<p>Dear {name},</p>"
+            "<p>I hope this note finds you well. I wanted to follow up on my earlier email "
+            "about the <strong>{role}</strong> opportunity at <strong>{company}</strong>.</p>"
+            "<p>I understand things get busy, and I would be happy to share any additional "
+            "information that would help. If there is someone else on your team I should "
+            "be reaching out to, I would be grateful for the introduction.</p>"
+            "<p>Looking forward to hearing from you.</p>"
+            "<p>Warm regards,<br><strong>CA Harsh Agarwal</strong></p>"
+        )
+        st.session_state.followup_last_tmpl_choice = None
     if "quick_body_key_n" not in st.session_state:
         st.session_state.quick_body_key_n = 0
     if "quick_subject_text" not in st.session_state:
@@ -1171,6 +1188,313 @@ def tab_quick_send() -> None:
     st.dataframe(pd.DataFrame(results), use_container_width=True)
 
 
+def tab_followup() -> None:
+    """Send one follow-up to people who haven't replied to the first email."""
+    cfg = st.session_state.config
+    st.subheader("Follow-up")
+    st.caption(
+        "Find people you've emailed who haven't replied yet, then send them a "
+        "single follow-up. Skips anyone already sent a follow-up."
+    )
+
+    if not st.session_state.connected:
+        st.info("Connect Gmail in the sidebar to use Follow-up.")
+        return
+
+    # ---- Step 1: find candidates ----
+    st.markdown("**Step 1 — Find people who haven't replied**")
+
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        look_back = int(st.number_input(
+            "Look back for replies (days)",
+            min_value=1, max_value=365, value=30,
+            help="How far back Gmail is searched for replies.",
+            key="followup_lookback",
+        ))
+    with c2:
+        min_age = int(st.number_input(
+            "Wait at least N days after first email",
+            min_value=0, max_value=365, value=3,
+            help="Only show people emailed N+ days ago. Default 3 = polite.",
+            key="followup_minage",
+        ))
+    with c3:
+        check_clicked = st.button(
+            "🔍 Find non-responders",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if check_clicked:
+        log_rows = read_log(LOG_PATH)
+        primary_sends: dict[str, dict] = {}
+        followup_already_sent: set[str] = set()
+
+        for row in log_rows:
+            if (row.get("status") or "").lower() != "sent":
+                continue
+            email = (row.get("recipient_email") or "").strip().lower()
+            if not email:
+                continue
+            sector = row.get("sector") or ""
+            if sector == "Follow-up":
+                followup_already_sent.add(email)
+                continue
+            ts = row.get("timestamp") or ""
+            if email not in primary_sends or (
+                ts and ts < primary_sends[email].get("timestamp", "")
+            ):
+                primary_sends[email] = {
+                    "name": row.get("recipient_name", ""),
+                    "company": row.get("company", ""),
+                    "role": row.get("role", ""),
+                    "subject": row.get("subject", ""),
+                    "timestamp": ts,
+                }
+
+        candidates_emails = [e for e in primary_sends if e not in followup_already_sent]
+
+        if not candidates_emails:
+            st.info(
+                "Everyone you've emailed has either replied or already received a follow-up. "
+                "Nothing to do here."
+            )
+            st.session_state.followup_candidates = []
+            return
+
+        with st.spinner(
+            f"Querying Gmail for replies from {len(candidates_emails)} recipient(s)..."
+        ):
+            replies = st.session_state.sender.list_replies(
+                recipient_emails=candidates_emails,
+                days=look_back,
+            )
+        replied_emails = {
+            (r.get("matched_email") or "").strip().lower() for r in (replies or [])
+        }
+
+        from datetime import datetime
+        now = datetime.now()
+        candidates = []
+        for email in candidates_emails:
+            if email in replied_emails:
+                continue
+            info = primary_sends[email]
+            try:
+                ts_dt = datetime.fromisoformat(info["timestamp"])
+                days_ago = (now - ts_dt).days
+            except Exception:
+                days_ago = 0
+            if days_ago < min_age:
+                continue
+            candidates.append({
+                "send": True,
+                "email": email,
+                "name": info["name"],
+                "company": info["company"],
+                "role": info["role"],
+                "sent_at": (info["timestamp"] or "")[:10],
+                "days_ago": days_ago,
+                "original_subject": info["subject"],
+            })
+
+        st.session_state.followup_candidates = candidates
+        if not candidates:
+            st.info(
+                "Found primary sends, but they're either too recent or already replied. "
+                f"Try a smaller wait window (currently {min_age} days)."
+            )
+
+    candidates = st.session_state.get("followup_candidates", [])
+    if not candidates:
+        st.caption("Click 'Find non-responders' above to scan.")
+        return
+
+    st.markdown(f"**Found {len(candidates)} person(s) needing follow-up. Untick anyone to skip:**")
+    df = pd.DataFrame(candidates)
+    edited = st.data_editor(
+        df,
+        column_config={
+            "send": st.column_config.CheckboxColumn("Send?"),
+            "email": "Email",
+            "name": "Name",
+            "company": "Company",
+            "role": "Role",
+            "sent_at": "First sent",
+            "days_ago": st.column_config.NumberColumn("Days ago"),
+            "original_subject": st.column_config.TextColumn("Original subject", width="medium"),
+        },
+        use_container_width=True,
+        hide_index=True,
+        disabled=["email", "name", "company", "role", "sent_at", "days_ago", "original_subject"],
+        key="followup_editor",
+    )
+
+    to_send = edited[edited["send"]].to_dict("records")
+
+    # ---- Step 2: CV ----
+    st.markdown("**Step 2 — CV (optional for follow-up)**")
+    library_choices: list[str] = []
+    name_to_bytes: dict[str, bytes] = {}
+    for i in sorted(st.session_state.cv_library_names.keys()):
+        nm = (st.session_state.cv_library_names.get(i) or "").strip()
+        bts = st.session_state.cv_library.get(i)
+        if nm and bts:
+            library_choices.append(nm)
+            name_to_bytes[nm] = bts
+    NO_CV = "🚫 No CV (text-only follow-up)"
+    UPLOAD_NEW = "📤 Upload a new CV..."
+    cv_options = library_choices + [NO_CV, UPLOAD_NEW]
+    cv_choice = st.selectbox("Pick a CV", cv_options, key="followup_cv_choice")
+    cv_bytes: bytes | None = None
+    if cv_choice == UPLOAD_NEW:
+        f_upl = st.file_uploader("Upload CV PDF", type=["pdf"], key="followup_cv_upload")
+        if f_upl is not None:
+            cv_bytes = f_upl.getvalue()
+    elif cv_choice != NO_CV:
+        cv_bytes = name_to_bytes.get(cv_choice)
+    cv_display = st.text_input(
+        "Filename recipients see",
+        value=cfg.get("cv_display_filename") or "CV.pdf",
+        key="followup_cv_display",
+        disabled=(cv_choice == NO_CV),
+    )
+
+    # ---- Step 3: message ----
+    st.markdown("**Step 3 — Follow-up message** (placeholders: `{name}`, `{company}`, `{role}`)")
+
+    templates = st.session_state.templates
+    DEFAULT_FU = "🔄 Default follow-up"
+    CUSTOM = "✏️ Custom (write your own)"
+    tmpl_options = [DEFAULT_FU] + list(templates.keys()) + [CUSTOM]
+    prev_choice = st.session_state.followup_last_tmpl_choice
+    default_idx = tmpl_options.index(prev_choice) if prev_choice in tmpl_options else 0
+    tmpl_choice = st.selectbox(
+        "Template", tmpl_options, index=default_idx, key="followup_tmpl_choice"
+    )
+
+    if tmpl_choice != prev_choice:
+        if tmpl_choice == DEFAULT_FU:
+            st.session_state.followup_subject_text = "Following up: {role} at {company}"
+            st.session_state.followup_body_initial = (
+                "<p>Dear {name},</p>"
+                "<p>I hope this note finds you well. I wanted to follow up on my earlier "
+                "email about the <strong>{role}</strong> opportunity at "
+                "<strong>{company}</strong>.</p>"
+                "<p>I understand things get busy, and I would be happy to share any "
+                "additional information that would help.</p>"
+                "<p>Looking forward to hearing from you.</p>"
+                "<p>Warm regards,<br><strong>CA Harsh Agarwal</strong></p>"
+            )
+            st.session_state.followup_body_key_n += 1
+        elif tmpl_choice in templates:
+            st.session_state.followup_subject_text = templates[tmpl_choice]["subject"]
+            st.session_state.followup_body_initial = templates[tmpl_choice]["body_html"]
+            st.session_state.followup_body_key_n += 1
+        st.session_state.followup_last_tmpl_choice = tmpl_choice
+        st.rerun()
+
+    subject = st.text_input("Subject", key="followup_subject_text")
+
+    if HAVE_QUILL:
+        body = st_quill(
+            value=st.session_state.followup_body_initial,
+            html=True,
+            placeholder="Write your follow-up...",
+            toolbar=[
+                [{"header": [1, 2, 3, False]}],
+                ["bold", "italic", "underline", "strike"],
+                [{"color": []}, {"background": []}],
+                [{"list": "ordered"}, {"list": "bullet"}],
+                [{"align": []}],
+                ["link"],
+                ["clean"],
+            ],
+            key=f"followup_body_quill_{st.session_state.followup_body_key_n}",
+        ) or ""
+    else:
+        body = st.text_area(
+            "Body (HTML)",
+            value=st.session_state.followup_body_initial,
+            height=280,
+            key=f"followup_body_{st.session_state.followup_body_key_n}",
+        )
+
+    # ---- Step 4: send ----
+    n_selected = len(to_send)
+    st.markdown(f"**Step 4 — Send to {n_selected} selected**")
+
+    send_clicked = st.button(
+        f"Send follow-up to {n_selected} selected",
+        type="primary",
+        use_container_width=True,
+        disabled=(n_selected == 0),
+    )
+    if not send_clicked:
+        return
+
+    attachments = [(cv_bytes, cv_display)] if cv_bytes else []
+    progress = st.progress(0.0)
+    status_line = st.empty()
+    results: list[dict[str, str]] = []
+    cap = int(cfg.get("daily_cap", 40))
+    min_d = int(cfg.get("min_delay_sec", 45))
+    max_d = int(cfg.get("max_delay_sec", 120))
+    if max_d < min_d:
+        min_d, max_d = max_d, min_d
+    total = n_selected
+    last_idx = total - 1
+    sent_this_run = 0
+
+    for i, row in enumerate(to_send):
+        recipient_email = str(row.get("email", "") or "").strip()
+        company = str(row.get("company", "") or "").strip()
+        name = str(row.get("name", "") or "").strip()
+        role = str(row.get("role", "") or "").strip()
+
+        status_line.markdown(f"**[{i+1}/{total}]** {recipient_email}")
+
+        if sent_today_count() >= cap:
+            for j in range(i, total):
+                results.append({
+                    "email": str(to_send[j].get("email", "")),
+                    "status": "skipped", "info": "Daily cap reached.",
+                })
+            break
+
+        ctx = build_context({
+            "name": name, "company": company, "role": role, "sector": "Follow-up",
+        }, cfg)
+        sub = render(subject, ctx)
+        bod = render(body, ctx)
+
+        ok, info = do_send(
+            name, recipient_email, company, role, "Follow-up",
+            sub, bod, cfg, attachments=attachments,
+        )
+        results.append({
+            "email": recipient_email,
+            "status": "sent" if ok else "failed",
+            "info": info,
+        })
+        if ok:
+            sent_this_run += 1
+        progress.progress((i + 1) / total)
+
+        if i != last_idx and ok:
+            delay = random.randint(min_d, max_d) if max_d > 0 else 0
+            if delay > 0:
+                status_line.markdown(
+                    f"**[{i+1}/{total}]** sleeping {delay}s before next..."
+                )
+                time.sleep(delay)
+
+    status_line.markdown(f"**Done.** Sent {sent_this_run} follow-up(s) this run.")
+    st.dataframe(pd.DataFrame(results), use_container_width=True)
+    st.session_state.followup_candidates = []  # force re-scan next time
+
+
 def tab_replies() -> None:
     st.subheader("Replies from people I've applied to")
     if not st.session_state.connected:
@@ -1308,9 +1632,10 @@ def main() -> None:
         "Templates, attachments, delays, and a send log — all on disk."
     )
 
-    t_quick, t1, t2, t3, t4, t5 = st.tabs(
+    t_quick, t_fu, t1, t2, t3, t4, t5 = st.tabs(
         [
             "🚀 Quick Send",
+            "🔄 Follow-up",
             "📝 Compose",
             "📂 Bulk Import",
             "📋 Templates",
@@ -1320,6 +1645,8 @@ def main() -> None:
     )
     with t_quick:
         tab_quick_send()
+    with t_fu:
+        tab_followup()
     with t1:
         tab_compose()
     with t2:
