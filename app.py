@@ -17,6 +17,12 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+try:
+    from streamlit_quill import st_quill
+    HAVE_QUILL = True
+except ImportError:
+    HAVE_QUILL = False
+
 from email_sender import GmailSender
 from template_manager import DEFAULT_TEMPLATES, load_templates, render, save_templates
 
@@ -783,7 +789,28 @@ def tab_quick_send() -> None:
         "<p>Warm regards,<br><strong>CA Harsh Agarwal</strong></p>"
     )
     subject = st.text_input("Subject", value=default_subject, key="quick_subject")
-    body = st.text_area("Body (HTML)", value=default_body, height=280, key="quick_body")
+
+    if HAVE_QUILL:
+        body = st_quill(
+            value=default_body,
+            html=True,
+            placeholder=(
+                "Write your message... use {name}, {company}, {role}, {custom1}, {custom2} "
+                "as placeholders."
+            ),
+            toolbar=[
+                [{"header": [1, 2, 3, False]}],
+                ["bold", "italic", "underline", "strike"],
+                [{"color": []}, {"background": []}],
+                [{"list": "ordered"}, {"list": "bullet"}],
+                [{"align": []}],
+                ["link"],
+                ["clean"],
+            ],
+            key="quick_body_quill",
+        ) or ""
+    else:
+        body = st.text_area("Body (HTML)", value=default_body, height=280, key="quick_body")
 
     skip_dupes = st.checkbox(
         "Skip duplicates already in send log", value=True, key="quick_skip"
