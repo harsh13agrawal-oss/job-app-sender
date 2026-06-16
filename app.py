@@ -428,9 +428,11 @@ def preflight_send(
         return False, "Subject is empty."
     if not (html_body or "").strip():
         return False, "Body is empty."
-    for path, _ in attachments:
-        if path and not os.path.isfile(path):
-            return False, f"Attachment not found on disk: {path}"
+    for source, _ in attachments:
+        if isinstance(source, (bytes, bytearray)):
+            continue  # uploaded in-memory bytes, no disk path to check
+        if source and not os.path.isfile(str(source)):
+            return False, f"Attachment not found on disk: {source}"
     if sent_today_count() >= int(cfg.get("daily_cap", 40)):
         return False, "Daily cap reached."
     return True, ""
