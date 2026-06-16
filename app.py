@@ -289,7 +289,20 @@ def render_sidebar() -> None:
             st.error("Gmail auto-connect failed.")
             if err:
                 st.caption(err)
-            st.caption("Re-run generate_cloud_token.py locally and update the secret.")
+            st.caption(
+                "**Why this usually happens:** your OAuth consent screen is in "
+                "*Testing* mode — Google expires refresh tokens after 7 days of no use. "
+                "Two fixes:"
+            )
+            st.caption(
+                "1. **Quick fix:** locally run `python generate_cloud_token.py`, "
+                "copy the `[gmail_token]` block, paste into Streamlit secrets."
+            )
+            st.caption(
+                "2. **Permanent fix:** in Google Cloud Console → OAuth consent screen "
+                "→ **Publish App** (no verification needed for personal use). "
+                "Tokens then never expire. See [README → token expiry]."
+            )
         else:
             st.info("Not connected")
             if st.button("Connect Gmail", use_container_width=True, type="primary"):
@@ -852,6 +865,123 @@ def tab_templates() -> None:
                 st.rerun()
 
 
+def _render_schedule_form(
+    *,
+    df,
+    subject: str,
+    body: str,
+    cv_bytes: bytes | None,
+    cv_display: str,
+    is_followup: bool,
+    ctx_label: str,
+) -> None:
+    """Renders the 'schedule for later' UI inside a popover. Writes a queue row when submitted."""
+    if not CLOUD_MODE or not _has_secret("gsheets_service_account"):
+        st.caption("Scheduling needs cloud mode with Google Sheets configured.")
+        return
+    if df is None or len(df) == 0:
+        st.caption("Upload a recipient list to enable scheduling.")
+        return
+
+    from datetime import datetime, time as _time, timedelta, timezone
+    import uuid
+
+    st.caption(
+        "Schedules a one-shot send via GitHub Actions. The runner fires every 15 "
+        "min; sends happen within ~15 min of the chosen time."
+    )
+
+    # Default: next Tuesday 09:00 IST
+    now_local = datetime.now()
+    days_ahead = (1 - now_local.weekday()) % 7  # 1 = Tuesday
+    if days_ahead == 0 and now_local.hour >= 9:
+        days_ahead = 7
+    default_date = (now_local + timedelta(days=days_ahead)).date()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        sched_date = st.date_input(
+            "Date", value=default_date, key=f"sched_date_{ctx_label}"
+        )
+    with c2:
+        sched_time = st.time_input(
+            "Time (IST)",
+            value=_time(9, 0),
+            step=900,  # 15 min increments
+            key=f"sched_time_{ctx_label}",
+        )
+
+    # Convert to UTC ISO (IST is UTC+5:30)
+    ist = timezone(timedelta(hours=5, minutes=30))
+    naive = datetime.combine(sched_date, sched_time)
+    sched_dt_ist = naive.replace(tzinfo=ist)
+    sched_dt_utc = sched_dt_ist.astimezone(timezone.utc)
+    sched_iso_utc = sched_dt_utc.replace(microsecond=0).isoformat()
+
+    st.caption(
+        f"→ Will fire at **{sched_dt_ist.strftime('%a %d %b %Y, %H:%M IST')}** "
+        f"({sched_iso_utc} UTC). Make sure the GitHub Actions workflow is set up "
+        "(see README → Scheduler setup)."
+    )
+
+    if cv_bytes is None:
+        st.caption("ℹ️ No CV attached — scheduled email will be text-only.")
+
+    submit = st.button(
+        f"Queue {len(df)} send(s)",
+        type="primary",
+        use_container_width=True,
+        key=f"sched_submit_{ctx_label}",
+    )
+    if not submit:
+        return
+
+    try:
+        from scheduled_queue import enqueue
+    except Exception as e:
+        st.error(f"Could not load scheduler: {e}")
+        return
+
+    recipients_payload = []
+    for _, row in df.iterrows():
+        rd = {
+            "name": str(row.get("name", "") or ""),
+            "email": str(row.get("email", "") or ""),
+            "company": str(row.get("company", "") or ""),
+            "role": str(row.get("role", "") or ""),
+            "custom1": str(row.get("custom1", "") or ""),
+            "custom2": str(row.get("custom2", "") or ""),
+        }
+        # follow-ups need the original message id so the runner can thread the reply
+        if is_followup and "original_message_id" in row:
+            rd["original_message_id"] = str(row.get("original_message_id", "") or "")
+        recipients_payload.append(rd)
+
+    try:
+        enqueue(
+            sa_info=dict(st.secrets["gsheets_service_account"]),
+            sheet_id=st.secrets["gsheets_sheet_id"],
+            scheduled_at_iso=sched_iso_utc,
+            sender_email=st.session_state.connected_email or "",
+            subject=subject,
+            body_html=body,
+            cv_filename=cv_display,
+            cv_bytes=cv_bytes,
+            recipients=recipients_payload,
+            is_followup=is_followup,
+            queue_id=str(uuid.uuid4()),
+        )
+    except Exception as e:
+        st.error(f"Failed to queue: {e}")
+        return
+
+    st.success(
+        f"Queued {len(recipients_payload)} send(s) for "
+        f"{sched_dt_ist.strftime('%a %d %b %H:%M IST')}. "
+        "Check the **Queue** worksheet in your Google Sheet to monitor status."
+    )
+
+
 @st.cache_data
 def _sample_recipients_xlsx_bytes() -> bytes:
     """Build a sample recipient list as an Excel file in memory."""
@@ -1107,13 +1237,24 @@ def tab_quick_send() -> None:
             st.markdown("---")
             st.markdown(render(body, ctx), unsafe_allow_html=True)
 
-    send_clicked = st.button(
-        "Send to all",
-        type="primary",
-        disabled=not st.session_state.connected,
-        help=("Connect Gmail first" if not st.session_state.connected else None),
-        use_container_width=True,
-    )
+    bc_send, bc_schedule = st.columns([2, 2])
+    with bc_send:
+        send_clicked = st.button(
+            "Send to all now",
+            type="primary",
+            disabled=not st.session_state.connected,
+            help=("Connect Gmail first" if not st.session_state.connected else None),
+            use_container_width=True,
+        )
+    with bc_schedule:
+        with st.popover("📅 Schedule for later", use_container_width=True):
+            _scheduled_at_iso = _render_schedule_form(
+                df=df, subject=subject, body=body,
+                cv_bytes=cv_bytes, cv_display=cv_display,
+                is_followup=False,
+                ctx_label="Quick Send",
+            )
+
     if not send_clicked:
         return
 
@@ -1440,12 +1581,31 @@ def tab_followup() -> None:
         "(same conversation, 'Re:' subject)."
     )
 
-    send_clicked = st.button(
-        f"Send follow-up to {n_selected} selected",
-        type="primary",
-        use_container_width=True,
-        disabled=(n_selected == 0),
-    )
+    bc_send, bc_schedule = st.columns([2, 2])
+    with bc_send:
+        send_clicked = st.button(
+            f"Send to {n_selected} now",
+            type="primary",
+            use_container_width=True,
+            disabled=(n_selected == 0),
+        )
+    with bc_schedule:
+        with st.popover(
+            "📅 Schedule for later",
+            use_container_width=True,
+            disabled=(n_selected == 0),
+        ):
+            # Build a df with original_message_id for the runner's reply threading.
+            msg_ids_map = st.session_state.get("followup_msg_ids", {})
+            fu_df = pd.DataFrame([
+                {**r, "original_message_id": msg_ids_map.get(r.get("email", ""), "")}
+                for r in to_send
+            ])
+            _render_schedule_form(
+                df=fu_df, subject=subject, body=body,
+                cv_bytes=cv_bytes, cv_display=cv_display,
+                is_followup=True, ctx_label="Follow-up",
+            )
     if not send_clicked:
         return
 
@@ -1577,11 +1737,14 @@ def tab_replies() -> None:
         st.success("No replies found in the look-back window. (Or refresh to check again.)")
         return
 
+    from reply_classifier import classify as _classify_reply
     rows = []
     for r in replies:
         meta = sent_index.get(r.get("matched_email", ""), {})
+        cat, _conf = _classify_reply(r.get("subject", ""), r.get("snippet", ""))
         rows.append(
             {
+                "Category": cat,
                 "Date": r.get("date", ""),
                 "From": r.get("from", ""),
                 "Subject": r.get("subject", ""),
@@ -1596,7 +1759,24 @@ def tab_replies() -> None:
         )
     df = pd.DataFrame(rows)
 
-    q = st.text_input("Search (from / subject / company)", key="reply_search").strip().lower()
+    # --- Summary counts per category ---
+    if not df.empty:
+        counts = df["Category"].value_counts().to_dict()
+        from reply_classifier import CATEGORIES_ORDERED as _CATS
+        summary_parts = [f"**{counts.get(c, 0)}** {c}" for c in _CATS if counts.get(c, 0) > 0]
+        if summary_parts:
+            st.markdown(" · ".join(summary_parts))
+
+    # --- Filters ---
+    fc1, fc2 = st.columns([1, 2])
+    with fc1:
+        all_cats = ["All"] + sorted(df["Category"].unique().tolist()) if not df.empty else ["All"]
+        cat_filter = st.selectbox("Filter by category", all_cats, key="reply_cat_filter")
+    with fc2:
+        q = st.text_input("Search (from / subject / company)", key="reply_search").strip().lower()
+
+    if cat_filter != "All":
+        df = df[df["Category"] == cat_filter]
     if q:
         mask = (
             df["From"].str.lower().str.contains(q, na=False)
@@ -1609,6 +1789,7 @@ def tab_replies() -> None:
         df,
         use_container_width=True,
         column_config={
+            "Category": st.column_config.TextColumn(width="small"),
             "Open": st.column_config.LinkColumn("Open in Gmail", display_text="↗ open"),
             "Snippet": st.column_config.TextColumn(width="large"),
         },

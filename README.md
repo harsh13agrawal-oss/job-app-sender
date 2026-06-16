@@ -129,7 +129,66 @@ job_app_sender/
 
 ---
 
-## 8. Troubleshooting
+## 8. OAuth token expiry — one-time fix to stop weekly re-auth
+
+By default, OAuth apps in "Testing" mode (where Google places yours after step 2) have a **7-day refresh-token lifetime**. If you don't use the app for a week, the next launch fails with "Gmail auto-connect failed" and you have to re-mint the token.
+
+**The permanent fix is to publish the app.** This sounds scary but for personal use it requires no verification:
+
+1. [console.cloud.google.com](https://console.cloud.google.com) → pick your project (the one called *Gmail API* in your case) → **APIs & Services** → **OAuth consent screen**.
+2. You'll see *Publishing status: Testing*. Click **Publish App**.
+3. A dialog appears:
+   - If your app uses **only** non-sensitive scopes → it's published instantly, you're done.
+   - If your scopes include **sensitive** ones (`gmail.send`, `gmail.readonly` both qualify) → Google asks if you want to submit for verification. **You don't have to.** The warning screen recipients see during sign-in just says "Google hasn't verified this app" — you click *Advanced → Continue* once and it works for the lifetime of your account.
+4. Status switches to **In production**. Refresh tokens now last indefinitely.
+
+You don't need to submit for verification unless you plan to share the app with others (and even then, it works for unverified users with the one-time warning click).
+
+After publishing:
+- Re-run `python generate_cloud_token.py` once locally to mint a fresh token under the new mode
+- Paste the new `[gmail_token]` block into Streamlit Cloud → Settings → Secrets
+- Done — no more weekly expiry
+
+## 9. Send-time scheduler (optional, ~10 min setup)
+
+The Quick Send and Follow-up tabs have a **📅 Schedule for later** button. To make it actually fire at the scheduled time, you need to set up a free GitHub Actions cron that runs `scheduler_runner.py` every 15 minutes.
+
+### How it works
+- When you click **Schedule for later**, the app writes the entire batch (recipients + subject + body + CV as chunked base64) to a `Queue` worksheet in your Google Sheet.
+- A GitHub Actions workflow (`.github/workflows/scheduled-sender.yml`) runs every 15 min, reads the Queue, finds anything whose `scheduled_at` is in the past, and sends.
+- Status updates land in the Sheet's Queue worksheet (`pending` → `running` → `sent`/`failed`).
+
+### One-time setup
+
+1. Go to **github.com/harsh13agrawal-oss/job-app-sender → Settings → Secrets and variables → Actions → New repository secret** and add three secrets:
+
+   | Name | Value |
+   |---|---|
+   | `GMAIL_TOKEN_JSON` | Paste your `token.json` content (the JSON file — not the TOML block). You can also generate it again with `python generate_cloud_token.py` and read the JSON before TOML conversion. |
+   | `GSHEETS_SA_JSON` | Paste the contents of your service-account JSON (the original `engaged-ground-*.json` file). |
+   | `GSHEETS_SHEET_ID` | The sheet ID — same value as in your Streamlit Cloud secret `gsheets_sheet_id`. |
+
+2. Make sure the workflow is enabled. Go to the **Actions** tab on GitHub; if it asks "I understand my workflows, go ahead and enable them" → click that. The first cron run will fire within 15 min.
+
+3. Test it: in the app, schedule a send for ~5 min in the future to your own email. Within ~15 min you should see:
+   - The Sheet's Queue worksheet row flip from `pending` → `sent`
+   - The email arrives in your Gmail Sent and recipient's inbox
+
+### Notes
+
+- **Free tier coverage** — GitHub Actions gives 2,000 free minutes/month for private repos and unlimited for public repos. Each scheduler run takes < 1 min, so even for a public repo this is essentially free.
+- **CV size** — the queue stores the CV as base64 across 8 cells of 35 KB each, so any CV up to ~280 KB works. Most PDFs fit.
+- **Reliability** — GitHub may delay cron runs by up to 15 min when busy. So a "send at 9:00" may actually fire 9:00-9:30. Treat scheduled time as a window, not a precise minute.
+- **Manual trigger** — go to GitHub → Actions → Scheduled sender → Run workflow to fire the runner immediately without waiting for the cron.
+- **Cancel a queued job** — open the Queue worksheet, set `status` to `cancelled` for that row.
+
+## 10. Reply categoriser
+
+The **📬 Replies** tab now classifies each inbound reply into one of: **Interview**, **Info request**, **Rejection**, **Forwarded**, **Auto-reply**, or **Other** — keyword-based rules in `reply_classifier.py`. A summary line above the table shows counts ("4 Interview · 2 Info request · 11 Rejection"), and a Category filter lets you drill in.
+
+Categories are recomputed on every refresh, not stored. To tune the rules (add a keyword, fix a misclassification), edit `reply_classifier.py` and push.
+
+## 11. Troubleshooting
 
 - **"credentials.json not found"** — You haven't completed the OAuth setup in §2, or the file is in the wrong folder. It must be next to `app.py`.
 - **Browser opens but says "Access blocked: ... has not completed verification"** — Your Gmail address is not on the *Test users* list. Cloud Console → OAuth consent screen → Test users → Add users.
