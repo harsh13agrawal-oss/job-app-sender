@@ -735,15 +735,36 @@ def tab_templates() -> None:
         return
 
     selected = st.selectbox("Edit template", names, key="tmpl_select")
-    subject = st.text_area(
-        "Subject", value=templates[selected]["subject"], height=80, key=f"tmpl_subject_{selected}"
+    subject = st.text_input(
+        "Subject", value=templates[selected]["subject"], key=f"tmpl_subject_{selected}"
     )
-    body = st.text_area(
-        "Body (HTML)",
-        value=templates[selected]["body_html"],
-        height=360,
-        key=f"tmpl_body_{selected}",
-    )
+
+    if HAVE_QUILL:
+        body = st_quill(
+            value=templates[selected]["body_html"],
+            html=True,
+            placeholder=(
+                "Edit your template... use {name}, {company}, {role}, {custom1}, {custom2} "
+                "as placeholders."
+            ),
+            toolbar=[
+                [{"header": [1, 2, 3, False]}],
+                ["bold", "italic", "underline", "strike"],
+                [{"color": []}, {"background": []}],
+                [{"list": "ordered"}, {"list": "bullet"}],
+                [{"align": []}],
+                ["link"],
+                ["clean"],
+            ],
+            key=f"tmpl_body_quill_{selected}",
+        ) or ""
+    else:
+        body = st.text_area(
+            "Body (HTML)",
+            value=templates[selected]["body_html"],
+            height=360,
+            key=f"tmpl_body_{selected}",
+        )
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
