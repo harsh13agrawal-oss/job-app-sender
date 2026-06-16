@@ -477,6 +477,8 @@ def do_send(
     html_body: str,
     cfg: dict[str, Any],
     attachments: list | None = None,
+    thread_id: str | None = None,
+    in_reply_to: str | None = None,
 ) -> tuple[bool, str]:
     if attachments is None:
         attachments = attachments_for_sector(cfg, sector)
@@ -513,6 +515,8 @@ def do_send(
         attachments=attachments,
         bcc=bcc,
         reply_to=st.session_state.connected_email,
+        thread_id=thread_id,
+        in_reply_to=in_reply_to,
     )
     _safe_log(
         {
@@ -1251,6 +1255,7 @@ def tab_followup() -> None:
                     "role": row.get("role", ""),
                     "subject": row.get("subject", ""),
                     "timestamp": ts,
+                    "message_id": row.get("message_id_or_error", ""),
                 }
 
         candidates_emails = [e for e in primary_sends if e not in followup_already_sent]
@@ -1300,6 +1305,11 @@ def tab_followup() -> None:
             })
 
         st.session_state.followup_candidates = candidates
+        st.session_state.followup_msg_ids = {
+            email: primary_sends[email].get("message_id", "")
+            for email in candidates_emails
+            if email not in replied_emails
+        }
         if not candidates:
             st.info(
                 "Found primary sends, but they're either too recent or already replied. "
@@ -1425,6 +1435,17 @@ def tab_followup() -> None:
     n_selected = len(to_send)
     st.markdown(f"**Step 4 — Send to {n_selected} selected**")
 
+    send_as_reply = st.checkbox(
+        "✉️ Send as a reply in the original Gmail thread (recommended)",
+        value=True,
+        key="followup_send_as_reply",
+        help=(
+            "When on: the follow-up is threaded under the first email — same "
+            "conversation, 'Re:' subject, original message quoted below. "
+            "When off: a fresh, separate email."
+        ),
+    )
+
     send_clicked = st.button(
         f"Send follow-up to {n_selected} selected",
         type="primary",
@@ -1435,6 +1456,7 @@ def tab_followup() -> None:
         return
 
     attachments = [(cv_bytes, cv_display)] if cv_bytes else []
+    msg_ids_map = st.session_state.get("followup_msg_ids", {})
     progress = st.progress(0.0)
     status_line = st.empty()
     results: list[dict[str, str]] = []
@@ -1469,9 +1491,23 @@ def tab_followup() -> None:
         sub = render(subject, ctx)
         bod = render(body, ctx)
 
+        thread_id_val: str | None = None
+        in_reply_to_val: str | None = None
+        if send_as_reply:
+            orig_msg_id = msg_ids_map.get(recipient_email, "")
+            if orig_msg_id:
+                meta = st.session_state.sender.get_message_meta(orig_msg_id)
+                if meta:
+                    thread_id_val = meta.get("thread_id") or None
+                    in_reply_to_val = meta.get("message_id_header") or None
+                    orig_subj = meta.get("subject") or ""
+                    if orig_subj and not sub.lower().startswith("re:"):
+                        sub = f"Re: {orig_subj}"
+
         ok, info = do_send(
             name, recipient_email, company, role, "Follow-up",
             sub, bod, cfg, attachments=attachments,
+            thread_id=thread_id_val, in_reply_to=in_reply_to_val,
         )
         results.append({
             "email": recipient_email,

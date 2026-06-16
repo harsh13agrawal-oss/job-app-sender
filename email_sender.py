@@ -141,6 +141,36 @@ class GmailSender:
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
+    def get_message_meta(self, message_id: str) -> Optional[dict]:
+        """Return {'thread_id', 'message_id_header', 'subject'} for a stored msg id."""
+        if self.service is None or not message_id:
+            return None
+        try:
+            msg = (
+                self.service.users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=message_id,
+                    format="metadata",
+                    metadataHeaders=["Message-ID", "Subject"],
+                )
+                .execute()
+            )
+        except HttpError:
+            return None
+        except Exception:
+            return None
+        headers = {
+            h.get("name", "").lower(): h.get("value", "")
+            for h in (msg.get("payload", {}) or {}).get("headers", [])
+        }
+        return {
+            "thread_id": msg.get("threadId", ""),
+            "message_id_header": headers.get("message-id", ""),
+            "subject": headers.get("subject", ""),
+        }
+
     def build_message(
         self,
         sender_display_name: str,
@@ -150,6 +180,7 @@ class GmailSender:
         attachments: Iterable[tuple[str, str]],
         bcc: Optional[str] = None,
         reply_to: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
     ) -> dict:
         if not self.user_email:
             raise RuntimeError("Not authenticated — call authenticate() first.")
@@ -166,6 +197,9 @@ class GmailSender:
             outer["Bcc"] = bcc
         if reply_to:
             outer["Reply-To"] = reply_to
+        if in_reply_to:
+            outer["In-Reply-To"] = in_reply_to
+            outer["References"] = in_reply_to
 
         inner = MIMEMultipart("alternative")
         plain_text = self.html_to_text(html_body) or " "
@@ -304,6 +338,8 @@ class GmailSender:
         attachments: Iterable[tuple[str, str]],
         bcc: Optional[str] = None,
         reply_to: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        in_reply_to: Optional[str] = None,
     ) -> tuple[bool, str]:
         if self.service is None:
             return False, "Not authenticated."
@@ -321,7 +357,10 @@ class GmailSender:
                 attachments=attachments,
                 bcc=bcc,
                 reply_to=reply_to or self.user_email,
+                in_reply_to=in_reply_to,
             )
+            if thread_id:
+                message["threadId"] = thread_id
             result = self.service.users().messages().send(userId="me", body=message).execute()
             return True, result.get("id", "")
         except FileNotFoundError as e:
