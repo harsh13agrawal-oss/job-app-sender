@@ -175,6 +175,28 @@ def ensure_state() -> None:
         st.session_state.uploaded_cvs = {}
     if "uploaded_cls" not in st.session_state:
         st.session_state.uploaded_cls = {}
+    if "cv_library" not in st.session_state:
+        st.session_state.cv_library = {}  # {idx: bytes}
+    if "cv_library_names" not in st.session_state:
+        st.session_state.cv_library_names = {}  # {idx: name}
+    if "quick_body_key_n" not in st.session_state:
+        st.session_state.quick_body_key_n = 0
+    if "quick_subject_text" not in st.session_state:
+        first = next(iter(st.session_state.templates), None)
+        if first:
+            st.session_state.quick_subject_text = st.session_state.templates[first]["subject"]
+            st.session_state.quick_body_initial = st.session_state.templates[first]["body_html"]
+            st.session_state.quick_last_tmpl_choice = first
+        else:
+            st.session_state.quick_subject_text = (
+                "Application for {role} at {company} – CA Harsh Agarwal"
+            )
+            st.session_state.quick_body_initial = (
+                "<p>Dear {name},</p><p>I am writing to express my interest in the "
+                "<strong>{role}</strong> opportunity at <strong>{company}</strong>.</p>"
+                "<p>{custom1}</p><p>Warm regards,<br><strong>CA Harsh Agarwal</strong></p>"
+            )
+            st.session_state.quick_last_tmpl_choice = None
     init_log(LOG_PATH)
 
 
@@ -287,7 +309,35 @@ def render_sidebar() -> None:
         )
 
         if CLOUD_MODE:
-            with st.expander("Upload CV PDFs (per sector)"):
+            with st.expander("📂 CV Library — upload your CVs", expanded=False):
+                st.caption(
+                    "Give each a friendly name. They appear in the Quick Send tab's "
+                    "CV dropdown."
+                )
+                for i in range(5):
+                    name_key = f"cv_lib_name_{i}"
+                    file_key = f"cv_lib_file_{i}"
+                    name_val = st.text_input(
+                        f"Name #{i+1}",
+                        value=st.session_state.cv_library_names.get(i, ""),
+                        key=name_key,
+                        placeholder=f"e.g. Finance CV",
+                    )
+                    st.session_state.cv_library_names[i] = name_val
+                    f_upl = st.file_uploader(
+                        f"PDF #{i+1}",
+                        type=["pdf"],
+                        key=file_key,
+                    )
+                    if f_upl is not None:
+                        st.session_state.cv_library[i] = f_upl.getvalue()
+                    if st.session_state.cv_library.get(i):
+                        n = st.session_state.cv_library_names.get(i) or f"CV {i+1}"
+                        st.caption(f"  ✅ '{n}' loaded")
+                    if i < 4:
+                        st.divider()
+
+            with st.expander("Upload CV PDFs (per sector — for Bulk Import tab)"):
                 st.caption("Files are held in memory only for this session.")
                 for s in SECTORS:
                     up = st.file_uploader(
@@ -764,35 +814,72 @@ def tab_quick_send() -> None:
     )
     uploaded = st.file_uploader("Upload list", type=["csv", "xlsx"], key="quick_uploader")
 
-    st.markdown("**Step 2 — Your CV** (single PDF, attached to every email)")
-    cv_file = st.file_uploader("Upload CV PDF", type=["pdf"], key="quick_cv_upload")
+    # ---- Step 2: pick or upload a CV ----
+    st.markdown("**Step 2 — Your CV** (one PDF, attached to every email)")
+    library_choices: list[str] = []
+    name_to_bytes: dict[str, bytes] = {}
+    for i in sorted(st.session_state.cv_library_names.keys()):
+        nm = (st.session_state.cv_library_names.get(i) or "").strip()
+        bts = st.session_state.cv_library.get(i)
+        if nm and bts:
+            library_choices.append(nm)
+            name_to_bytes[nm] = bts
+
+    upload_new_label = "📤 Upload a new CV..."
+    cv_options = library_choices + [upload_new_label]
+    if not library_choices:
+        st.caption(
+            "No CVs in your library yet. Add some in the sidebar (📂 CV Library), "
+            "or upload one here for this session."
+        )
+    cv_choice = st.selectbox("Pick a CV", cv_options, key="quick_cv_choice")
+
+    cv_bytes: bytes | None = None
+    if cv_choice == upload_new_label:
+        cv_file = st.file_uploader("Upload CV PDF", type=["pdf"], key="quick_cv_upload")
+        if cv_file is not None:
+            cv_bytes = cv_file.getvalue()
+    else:
+        cv_bytes = name_to_bytes.get(cv_choice)
+
     cv_display = st.text_input(
         "Filename recipients see",
-        value=cfg.get("cv_display_filename") or "CV.pdf",
+        value=cfg.get("cv_display_filename") or (
+            f"{cv_choice}.pdf" if cv_choice != upload_new_label else "CV.pdf"
+        ),
         key="quick_cv_display",
     )
 
-    st.markdown(
-        "**Step 3 — Your message**  "
-        "(use `{name}`, `{company}`, `{role}`, `{custom1}`, `{custom2}` as placeholders)"
+    # ---- Step 3: pick a template or write custom ----
+    st.markdown("**Step 3 — Your message** (pick a template or write your own)")
+    st.caption(
+        "Placeholders supported: `{name}`, `{company}`, `{role}`, `{custom1}`, `{custom2}`"
     )
-    default_subject = "Application for {role} at {company} – CA Harsh Agarwal"
-    default_body = (
-        "<p>Dear {name},</p>"
-        "<p>I am writing to express my interest in the <strong>{role}</strong> opportunity at "
-        "<strong>{company}</strong>.</p>"
-        "<p>{custom1}</p>"
-        "<p>As a Chartered Accountant, I bring experience across financial reporting, "
-        "valuation, and analysis. I have attached my CV for your review and would welcome "
-        "the opportunity to discuss how I could contribute to {company}.</p>"
-        "<p>{custom2}</p>"
-        "<p>Warm regards,<br><strong>CA Harsh Agarwal</strong></p>"
+
+    templates = st.session_state.templates
+    CUSTOM = "✏️ Custom (write your own)"
+    tmpl_options = list(templates.keys()) + [CUSTOM]
+    prev_choice = st.session_state.get("quick_last_tmpl_choice")
+    default_idx = tmpl_options.index(prev_choice) if prev_choice in tmpl_options else 0
+
+    tmpl_choice = st.selectbox(
+        "Template", tmpl_options, index=default_idx, key="quick_tmpl_choice"
     )
-    subject = st.text_input("Subject", value=default_subject, key="quick_subject")
+
+    if tmpl_choice != prev_choice and tmpl_choice in templates:
+        st.session_state.quick_subject_text = templates[tmpl_choice]["subject"]
+        st.session_state.quick_body_initial = templates[tmpl_choice]["body_html"]
+        st.session_state.quick_body_key_n += 1
+        st.session_state.quick_last_tmpl_choice = tmpl_choice
+        st.rerun()
+    elif tmpl_choice != prev_choice:
+        st.session_state.quick_last_tmpl_choice = tmpl_choice
+
+    subject = st.text_input("Subject", key="quick_subject_text")
 
     if HAVE_QUILL:
         body = st_quill(
-            value=default_body,
+            value=st.session_state.quick_body_initial,
             html=True,
             placeholder=(
                 "Write your message... use {name}, {company}, {role}, {custom1}, {custom2} "
@@ -807,17 +894,34 @@ def tab_quick_send() -> None:
                 ["link"],
                 ["clean"],
             ],
-            key="quick_body_quill",
+            key=f"quick_body_quill_{st.session_state.quick_body_key_n}",
         ) or ""
     else:
-        body = st.text_area("Body (HTML)", value=default_body, height=280, key="quick_body")
+        body = st.text_area(
+            "Body (HTML)",
+            value=st.session_state.quick_body_initial,
+            height=280,
+            key=f"quick_body_{st.session_state.quick_body_key_n}",
+        )
+
+    with st.expander("💾 Save current as a new template"):
+        new_tmpl_name = st.text_input("Template name", key="quick_save_tmpl_name")
+        if st.button("Save as new template", disabled=not new_tmpl_name.strip()):
+            nm = new_tmpl_name.strip()
+            if nm in templates:
+                st.error(f"'{nm}' already exists. Pick a different name.")
+            else:
+                templates[nm] = {"subject": subject, "body_html": body}
+                save_templates(templates, TEMPLATES_PATH)
+                st.success(f"Saved '{nm}'. It now appears in the Template dropdown.")
+                st.rerun()
 
     skip_dupes = st.checkbox(
         "Skip duplicates already in send log", value=True, key="quick_skip"
     )
 
-    if uploaded is None or cv_file is None:
-        st.info("Upload both the list and the CV to continue.")
+    if uploaded is None or not cv_bytes:
+        st.info("Upload the recipient list and pick (or upload) a CV to continue.")
         return
 
     try:
@@ -862,7 +966,6 @@ def tab_quick_send() -> None:
     if not send_clicked:
         return
 
-    cv_bytes = cv_file.getvalue()
     attachments = [(cv_bytes, cv_display)]
 
     progress = st.progress(0.0)
