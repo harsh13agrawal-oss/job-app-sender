@@ -436,6 +436,18 @@ def preflight_send(
     return True, ""
 
 
+def _safe_log(entry: dict) -> None:
+    """Append a log row, but never let a logging failure break the send."""
+    try:
+        append_entry(entry, LOG_PATH)
+    except Exception as e:
+        st.warning(
+            f"⚠️ Couldn't log to Google Sheet: **{type(e).__name__}**: {e}\n\n"
+            "The email itself was sent successfully (if status='sent' above). "
+            "This is a logging-only issue."
+        )
+
+
 def do_send(
     recipient_name: str,
     recipient_email: str,
@@ -457,7 +469,7 @@ def do_send(
         return str(att[0])
 
     if not ok:
-        append_entry(
+        _safe_log(
             {
                 "timestamp": now_iso(),
                 "recipient_name": recipient_name,
@@ -469,8 +481,7 @@ def do_send(
                 "subject": subject,
                 "status": "skipped",
                 "message_id_or_error": msg,
-            },
-            LOG_PATH,
+            }
         )
         return False, msg
 
@@ -484,7 +495,7 @@ def do_send(
         bcc=bcc,
         reply_to=st.session_state.connected_email,
     )
-    append_entry(
+    _safe_log(
         {
             "timestamp": now_iso(),
             "recipient_name": recipient_name,
@@ -496,8 +507,7 @@ def do_send(
             "subject": subject,
             "status": "sent" if ok else "failed",
             "message_id_or_error": info,
-        },
-        LOG_PATH,
+        }
     )
     return ok, info
 
