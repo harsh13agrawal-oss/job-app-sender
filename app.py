@@ -81,8 +81,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "cover_letter_display_filename": "Harsh Agarwal - Cover Letter.pdf",
     "cv_paths": {s: "" for s in SECTORS},
     "cover_letter_paths": {s: "" for s in SECTORS},
-    "claude_model": "claude-opus-4-8",
-    "claude_system_prompt": "",
 }
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -355,45 +353,6 @@ def render_sidebar() -> None:
                 max_value=500,
                 value=int(cfg.get("daily_cap", 40)),
             )
-        )
-
-        st.divider()
-        st.header("🤖 Claude AI assist")
-        st.caption(
-            "Optional. Used by the 'Draft' and 'Polish' buttons in the Quick Send tab."
-        )
-
-        default_key = ""
-        if _has_secret("anthropic_api_key"):
-            default_key = st.secrets["anthropic_api_key"]
-        current_key = st.session_state.get("anthropic_api_key", default_key)
-        new_key = st.text_input(
-            "Anthropic API key",
-            value=current_key,
-            type="password",
-            help="From console.anthropic.com -> API Keys. Separate billing from Claude Pro.",
-            key="claude_key_input",
-        )
-        st.session_state.anthropic_api_key = new_key
-
-        from claude_drafter import MODELS as _CLAUDE_MODELS
-        cfg["claude_model"] = st.selectbox(
-            "Model",
-            _CLAUDE_MODELS,
-            index=max(0, _CLAUDE_MODELS.index(cfg.get("claude_model", _CLAUDE_MODELS[0]))
-                      if cfg.get("claude_model") in _CLAUDE_MODELS else 0),
-            key="claude_model_select",
-        )
-
-        default_prompt = cfg.get("claude_system_prompt", "")
-        if not default_prompt and _has_secret("claude_system_prompt"):
-            default_prompt = st.secrets["claude_system_prompt"]
-        cfg["claude_system_prompt"] = st.text_area(
-            "Drafting instructions (paste from your Claude.ai Project's Custom instructions)",
-            value=default_prompt,
-            height=160,
-            help="The 'Custom instructions' field of your Project. Without this, Claude has no idea what tone/style you want.",
-            key="claude_system_prompt_input",
         )
 
         if st.button("Save settings", use_container_width=True):
@@ -831,85 +790,9 @@ def tab_quick_send() -> None:
     )
     subject = st.text_input("Subject", value=default_subject, key="quick_subject")
 
-    # --- Claude AI Draft/Polish controls (only if API key + system prompt set) ---
-    api_key = st.session_state.get("anthropic_api_key", "")
-    sys_prompt = cfg.get("claude_system_prompt", "")
-    model = cfg.get("claude_model", "claude-opus-4-8")
-
-    if "quick_body_key_n" not in st.session_state:
-        st.session_state.quick_body_key_n = 0
-    if "quick_body_initial" not in st.session_state:
-        st.session_state.quick_body_initial = default_body
-
-    with st.expander("✨ Draft / Polish with Claude", expanded=False):
-        if not api_key:
-            st.info("Add your Anthropic API key in the sidebar to enable AI drafting.")
-        elif not sys_prompt:
-            st.info(
-                "Paste your Claude.ai Project's 'Custom instructions' into the sidebar "
-                "so the model knows your tone/style."
-            )
-        context_for_draft = st.text_area(
-            "Context (job description, company info, why you're a fit, etc.)",
-            height=130,
-            key="quick_draft_context",
-            placeholder="Paste the job posting, or describe the role, company, your hook...",
-        )
-        polish_instructions = st.text_input(
-            "Optional: extra polish instructions",
-            placeholder="e.g. make it more concise, less formal, mention X",
-            key="quick_polish_instructions",
-        )
-        c_draft, c_polish = st.columns(2)
-        with c_draft:
-            draft_clicked = st.button(
-                "✍️ Draft from scratch",
-                use_container_width=True,
-                disabled=not (api_key and sys_prompt and context_for_draft.strip()),
-                help=(
-                    "Needs API key, system prompt, and context above."
-                    if not (api_key and sys_prompt and context_for_draft.strip())
-                    else None
-                ),
-            )
-        with c_polish:
-            polish_clicked = st.button(
-                "✨ Polish current draft",
-                use_container_width=True,
-                disabled=not (api_key and sys_prompt),
-            )
-
-        if draft_clicked:
-            from claude_drafter import draft_from_context
-            with st.spinner(f"Drafting with {model}..."):
-                ok, out = draft_from_context(api_key, sys_prompt, context_for_draft, model=model)
-            if ok:
-                st.session_state.quick_body_initial = out
-                st.session_state.quick_body_key_n += 1
-                st.success("Drafted. The editor below has been updated.")
-                st.rerun()
-            else:
-                st.error(out)
-
-        if polish_clicked:
-            from claude_drafter import polish_existing
-            current_key = f"quick_body_quill_{st.session_state.quick_body_key_n}"
-            current = st.session_state.get(current_key, st.session_state.quick_body_initial) or ""
-            with st.spinner(f"Polishing with {model}..."):
-                ok, out = polish_existing(
-                    api_key, sys_prompt, current, instructions=polish_instructions or None, model=model
-                )
-            if ok:
-                st.session_state.quick_body_initial = out
-                st.session_state.quick_body_key_n += 1
-                st.success("Polished. The editor below has been updated.")
-                st.rerun()
-            else:
-                st.error(out)
-
     if HAVE_QUILL:
         body = st_quill(
-            value=st.session_state.quick_body_initial,
+            value=default_body,
             html=True,
             placeholder=(
                 "Write your message... use {name}, {company}, {role}, {custom1}, {custom2} "
@@ -924,15 +807,10 @@ def tab_quick_send() -> None:
                 ["link"],
                 ["clean"],
             ],
-            key=f"quick_body_quill_{st.session_state.quick_body_key_n}",
+            key="quick_body_quill",
         ) or ""
     else:
-        body = st.text_area(
-            "Body (HTML)",
-            value=st.session_state.quick_body_initial,
-            height=280,
-            key=f"quick_body_{st.session_state.quick_body_key_n}",
-        )
+        body = st.text_area("Body (HTML)", value=default_body, height=280, key="quick_body")
 
     skip_dupes = st.checkbox(
         "Skip duplicates already in send log", value=True, key="quick_skip"
