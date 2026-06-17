@@ -63,19 +63,6 @@ def _build_gmail_service(token_dict: dict):
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
-def _clean_html_body(html: str) -> str:
-    if not html:
-        return html
-    s = html
-    s = re.sub(
-        r"<p[^>]*>\s*(?:<br\s*/?>\s*|&nbsp;|\s)*</p>", "", s, flags=re.IGNORECASE
-    )
-    s = re.sub(r"(?:<br\s*/?>\s*){3,}", "<br><br>", s, flags=re.IGNORECASE)
-    s = re.sub(r"^(?:\s|<br\s*/?>|&nbsp;)+", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"(?:\s|<br\s*/?>|&nbsp;)+$", "", s, flags=re.IGNORECASE)
-    return s
-
-
 _TITLES = {"dr", "mr", "mrs", "ms", "prof", "mx", "sir", "madam"}
 
 
@@ -128,9 +115,8 @@ def _build_raw_message(
         outer["References"] = in_reply_to
 
     inner = MIMEMultipart("alternative")
-    cleaned = _clean_html_body(html_body or "") or " "
-    inner.attach(MIMEText(_html_to_text(cleaned) or " ", "plain", "utf-8"))
-    inner.attach(MIMEText(cleaned, "html", "utf-8"))
+    inner.attach(MIMEText(_html_to_text(html_body) or " ", "plain", "utf-8"))
+    inner.attach(MIMEText(html_body or " ", "html", "utf-8"))
     outer.attach(inner)
 
     if cv_bytes:
