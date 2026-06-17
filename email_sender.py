@@ -126,6 +126,26 @@ class GmailSender:
         self.user_email = None
 
     @staticmethod
+    def clean_html_body(html: str) -> str:
+        """Strip Quill's invisible 'empty paragraph' blocks that render as blank
+        lines in delivered email. Removes <p></p>, <p><br></p>, <p>&nbsp;</p>
+        and similar; collapses runs of 3+ <br> to 2; trims leading/trailing
+        empty space."""
+        if not html:
+            return html
+        s = html
+        s = re.sub(
+            r"<p[^>]*>\s*(?:<br\s*/?>\s*|&nbsp;|\s)*</p>",
+            "",
+            s,
+            flags=re.IGNORECASE,
+        )
+        s = re.sub(r"(?:<br\s*/?>\s*){3,}", "<br><br>", s, flags=re.IGNORECASE)
+        s = re.sub(r"^(?:\s|<br\s*/?>|&nbsp;)+", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"(?:\s|<br\s*/?>|&nbsp;)+$", "", s, flags=re.IGNORECASE)
+        return s
+
+    @staticmethod
     def html_to_text(html: str) -> str:
         """Crude HTML -> plain text for the text/plain alternative."""
         if not html:
@@ -202,9 +222,10 @@ class GmailSender:
             outer["References"] = in_reply_to
 
         inner = MIMEMultipart("alternative")
-        plain_text = self.html_to_text(html_body) or " "
+        cleaned_html = self.clean_html_body(html_body or "") or " "
+        plain_text = self.html_to_text(cleaned_html) or " "
         inner.attach(MIMEText(plain_text, "plain", "utf-8"))
-        inner.attach(MIMEText(html_body or " ", "html", "utf-8"))
+        inner.attach(MIMEText(cleaned_html, "html", "utf-8"))
         outer.attach(inner)
 
         for source, display_name in attachments or []:

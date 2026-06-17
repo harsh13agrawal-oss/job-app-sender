@@ -63,6 +63,29 @@ def _build_gmail_service(token_dict: dict):
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
+def _clean_html_body(html: str) -> str:
+    if not html:
+        return html
+    s = html
+    s = re.sub(
+        r"<p[^>]*>\s*(?:<br\s*/?>\s*|&nbsp;|\s)*</p>", "", s, flags=re.IGNORECASE
+    )
+    s = re.sub(r"(?:<br\s*/?>\s*){3,}", "<br><br>", s, flags=re.IGNORECASE)
+    s = re.sub(r"^(?:\s|<br\s*/?>|&nbsp;)+", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"(?:\s|<br\s*/?>|&nbsp;)+$", "", s, flags=re.IGNORECASE)
+    return s
+
+
+_TITLES = {"dr", "mr", "mrs", "ms", "prof", "mx", "sir", "madam"}
+
+
+def _first_name(full: str) -> str:
+    parts = (full or "").strip().split()
+    while parts and parts[0].rstrip(".").lower() in _TITLES:
+        parts = parts[1:]
+    return parts[0] if parts else ""
+
+
 def _html_to_text(html: str) -> str:
     import html as _html
     if not html:
@@ -105,8 +128,9 @@ def _build_raw_message(
         outer["References"] = in_reply_to
 
     inner = MIMEMultipart("alternative")
-    inner.attach(MIMEText(_html_to_text(html_body) or " ", "plain", "utf-8"))
-    inner.attach(MIMEText(html_body or " ", "html", "utf-8"))
+    cleaned = _clean_html_body(html_body or "") or " "
+    inner.attach(MIMEText(_html_to_text(cleaned) or " ", "plain", "utf-8"))
+    inner.attach(MIMEText(cleaned, "html", "utf-8"))
     outer.attach(inner)
 
     if cv_bytes:
@@ -226,8 +250,12 @@ def main() -> int:
             if not email:
                 failed += 1
                 continue
+            full = rcpt.get("name", "") or ""
+            first = _first_name(full)
             ctx = {
-                "name": rcpt.get("name", ""),
+                "name": first or "Hiring Team",
+                "first_name": first or "Hiring Team",
+                "full_name": full or "Hiring Team",
                 "company": rcpt.get("company", ""),
                 "role": rcpt.get("role", ""),
                 "custom1": rcpt.get("custom1", ""),

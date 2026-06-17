@@ -260,9 +260,25 @@ def attachments_for_sector(cfg: dict[str, Any], sector: str) -> list[tuple, ...]
     return out
 
 
+_TITLES = {"dr", "mr", "mrs", "ms", "prof", "mx", "sir", "madam"}
+
+
+def _first_name(full: str) -> str:
+    parts = (full or "").strip().split()
+    while parts and parts[0].rstrip(".").lower() in _TITLES:
+        parts = parts[1:]
+    return parts[0] if parts else ""
+
+
 def build_context(row: dict[str, Any], cfg: dict[str, Any]) -> dict[str, str]:
+    full = str(row.get("name", "") or "").strip()
+    first = _first_name(full)
     return {
-        "name": str(row.get("name", "") or "").strip() or "Hiring Team",
+        # `{name}` resolves to first name (default 'Hiring Team' if blank).
+        # Use `{full_name}` when you specifically want the full version.
+        "name": first or "Hiring Team",
+        "first_name": first or "Hiring Team",
+        "full_name": full or "Hiring Team",
         "company": str(row.get("company", "") or "").strip(),
         "role": str(row.get("role", "") or "").strip(),
         "sector": str(row.get("sector", "") or "").strip(),
