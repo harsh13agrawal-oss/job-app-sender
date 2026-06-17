@@ -179,6 +179,27 @@ def ensure_state() -> None:
         st.session_state.cv_library = {}  # {idx: bytes}
     if "cv_library_names" not in st.session_state:
         st.session_state.cv_library_names = {}  # {idx: name}
+    if "cv_library_filenames" not in st.session_state:
+        st.session_state.cv_library_filenames = {}  # {idx: filename}
+    if (
+        not st.session_state.get("cv_library_loaded")
+        and CLOUD_MODE
+        and _has_secret("gsheets_service_account")
+        and _has_secret("gsheets_sheet_id")
+    ):
+        try:
+            from cv_library_store import load_all as _load_cv_lib
+            for entry in _load_cv_lib(
+                dict(st.secrets["gsheets_service_account"]),
+                st.secrets["gsheets_sheet_id"],
+            ):
+                i = entry["idx"]
+                st.session_state.cv_library[i] = entry["bytes"]
+                st.session_state.cv_library_names[i] = entry["name"]
+                st.session_state.cv_library_filenames[i] = entry["filename"]
+        except Exception as e:
+            st.session_state.cv_library_load_error = str(e)
+        st.session_state.cv_library_loaded = True
     if "followup_candidates" not in st.session_state:
         st.session_state.followup_candidates = []
     if "followup_body_key_n" not in st.session_state:
@@ -357,8 +378,16 @@ def render_sidebar() -> None:
         if CLOUD_MODE:
             with st.expander("📂 CV Library — upload your CVs", expanded=False):
                 st.caption(
-                    "Give each a friendly name. They appear in the Quick Send tab's "
-                    "CV dropdown."
+                    "CVs are saved to your Google Sheet (`CV_Library` worksheet) "
+                    "and load automatically every time. Name a slot, upload, click Save."
+                )
+                if st.session_state.get("cv_library_load_error"):
+                    st.error(
+                        f"Could not load saved CVs: "
+                        f"{st.session_state.cv_library_load_error}"
+                    )
+                sa_ok = _has_secret("gsheets_service_account") and _has_secret(
+                    "gsheets_sheet_id"
                 )
                 for i in range(5):
                     name_key = f"cv_lib_name_{i}"
@@ -367,19 +396,83 @@ def render_sidebar() -> None:
                         f"Name #{i+1}",
                         value=st.session_state.cv_library_names.get(i, ""),
                         key=name_key,
-                        placeholder=f"e.g. Finance CV",
+                        placeholder="e.g. Finance CV",
                     )
                     st.session_state.cv_library_names[i] = name_val
+
                     f_upl = st.file_uploader(
                         f"PDF #{i+1}",
                         type=["pdf"],
                         key=file_key,
                     )
+                    fresh_bytes: bytes | None = None
                     if f_upl is not None:
-                        st.session_state.cv_library[i] = f_upl.getvalue()
+                        fresh_bytes = f_upl.getvalue()
+                        st.session_state.cv_library[i] = fresh_bytes
+                        st.session_state.cv_library_filenames[i] = f_upl.name
+
                     if st.session_state.cv_library.get(i):
                         n = st.session_state.cv_library_names.get(i) or f"CV {i+1}"
-                        st.caption(f"  ✅ '{n}' loaded")
+                        fn = st.session_state.cv_library_filenames.get(i, "")
+                        size_kb = len(st.session_state.cv_library[i]) // 1024
+                        st.caption(f"  ✅ '{n}' loaded ({fn}, {size_kb} KB)")
+
+                    bc_save, bc_delete = st.columns(2)
+                    with bc_save:
+                        save_disabled = (
+                            not sa_ok
+                            or not name_val.strip()
+                            or not st.session_state.cv_library.get(i)
+                        )
+                        if st.button(
+                            "💾 Save",
+                            key=f"cv_lib_save_{i}",
+                            use_container_width=True,
+                            disabled=save_disabled,
+                            help=(
+                                "Need a name and an uploaded file. Click to "
+                                "persist in your Google Sheet."
+                            ),
+                        ):
+                            try:
+                                from cv_library_store import save_slot as _save_cv
+                                _save_cv(
+                                    dict(st.secrets["gsheets_service_account"]),
+                                    st.secrets["gsheets_sheet_id"],
+                                    idx=i,
+                                    name=name_val.strip(),
+                                    filename=st.session_state.cv_library_filenames.get(i, ""),
+                                    cv_bytes=fresh_bytes
+                                    or st.session_state.cv_library.get(i),
+                                )
+                                st.success(f"Saved '{name_val}'.")
+                            except Exception as e:
+                                st.error(f"Save failed: {e}")
+                    with bc_delete:
+                        delete_disabled = (
+                            not sa_ok
+                            or not st.session_state.cv_library.get(i)
+                        )
+                        if st.button(
+                            "🗑️ Delete",
+                            key=f"cv_lib_delete_{i}",
+                            use_container_width=True,
+                            disabled=delete_disabled,
+                        ):
+                            try:
+                                from cv_library_store import delete_slot as _del_cv
+                                _del_cv(
+                                    dict(st.secrets["gsheets_service_account"]),
+                                    st.secrets["gsheets_sheet_id"],
+                                    idx=i,
+                                )
+                                st.session_state.cv_library.pop(i, None)
+                                st.session_state.cv_library_names.pop(i, None)
+                                st.session_state.cv_library_filenames.pop(i, None)
+                                st.success("Deleted.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Delete failed: {e}")
                     if i < 4:
                         st.divider()
 
